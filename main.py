@@ -2,6 +2,7 @@ import os
 import asyncio
 import base64
 import json
+import requests
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -16,6 +17,9 @@ from aiogram.types import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8858800582:AAGjBEdefs3UamNxGoT_L11Iym23gUslXlA")
 ADMIN_ID = int(os.environ.get("ALLOWED_USER_ID", "6984578665"))
 RAILWAY_URL = os.environ.get("RAILWAY_URL", "glazyebisha-production.up.railway.app")
+JSONBIN_ID = os.environ.get("JSONBIN_ID", "6a438e2bf5f4af5e29468615")
+JSONBIN_KEY = os.environ.get("JSONBIN_KEY", "$2a$10$8dtrM.qgCnu6DfWsHK370eDeqQMfPJqF5D583ERUDVENghX5j1/gW")
+JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_ID}"
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -36,18 +40,27 @@ ROLE_CAN = {
 }
 
 # users: {str(user_id): {"role": "...", "name": "..."}}
-USERS_FILE = "users.json"
+# Хранится в JSONBin.io — не теряется при передеплое на Railway
 
 def load_users() -> dict:
     try:
-        with open(USERS_FILE) as f:
-            return json.load(f)
-    except Exception:
+        headers = {"X-Master-Key": JSONBIN_KEY}
+        r = requests.get(f"{JSONBIN_URL}/latest", headers=headers, timeout=5)
+        if r.status_code == 200:
+            data = r.json().get("record", {})
+            if isinstance(data, dict):
+                return data.get("users", data) if "users" in data else data
+        return {}
+    except Exception as e:
+        print(f"[JSONBin] Load error: {e}")
         return {}
 
 def save_users(users: dict):
-    with open(USERS_FILE, "w") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+    try:
+        headers = {"X-Master-Key": JSONBIN_KEY, "Content-Type": "application/json"}
+        requests.put(JSONBIN_URL, json={"users": users}, headers=headers, timeout=5)
+    except Exception as e:
+        print(f"[JSONBin] Save error: {e}")
 
 users_db: dict = load_users()
 
