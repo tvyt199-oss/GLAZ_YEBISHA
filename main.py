@@ -476,10 +476,10 @@ async function init() {
 
 function applyRoleUI() {
   const isViewer = currentUserRole === 'viewer';
-  const isAdmin = currentUserRole === 'admin';
   document.querySelectorAll('.s-btn.r').forEach(b => b.style.display = isViewer?'none':'');
-  document.getElementById('page-users').style.display = isAdmin?'flex':'none';
-  if(isViewer) document.querySelector('[onclick="showTab(\'users\')"]').style.display='none';
+  document.querySelectorAll('.tab').forEach(t => {
+    if(t.getAttribute('onclick') === "showTab('users')" && isViewer) t.style.display='none';
+  });
 }
 
 // ── TABS ──
