@@ -14,12 +14,17 @@ from aiogram.types import (
 )
 
 # ─── КОНФИГУРАЦИЯ ─────────────────────────────────────────────
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8858800582:AAGjBEdefs3UamNxGoT_L11Iym23gUslXlA")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID = int(os.environ.get("ALLOWED_USER_ID", "6984578665"))
 RAILWAY_URL = os.environ.get("RAILWAY_URL", "glazyebisha-production.up.railway.app")
-JSONBIN_ID = os.environ.get("JSONBIN_ID", "6a438e2bf5f4af5e29468615")
-JSONBIN_KEY = os.environ.get("JSONBIN_KEY", "$2a$10$8dtrM.qgCnu6DfWsHK370eDeqQMfPJqF5D583ERUDVENghX5j1/gW")
-JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{JSONBIN_ID}"
+
+# Railway API — для хранения пользователей в Variables
+# Эти переменные Railway предоставляет автоматически внутри контейнера
+RAILWAY_TOKEN      = os.environ.get("RAILWAY_TOKEN", "4f11bbc5-ca52-42ac-8f48-19f2553d26e4")
+RAILWAY_PROJECT_ID = os.environ.get("RAILWAY_PROJECT_ID", "")
+RAILWAY_ENV_ID     = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
+RAILWAY_SERVICE_ID = os.environ.get("RAILWAY_SERVICE_ID", "")
+RAILWAY_GQL        = "https://backboard.railway.app/graphql/v2"
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -27,9 +32,9 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ─── РОЛИ ─────────────────────────────────────────────────────
-# admin   — всё
+# admin    — всё
 # operator — управление, но без питания/пользователей
-# viewer  — только скрины и стрим
+# viewer   — только скрины и стрим
 
 ROLES = {"admin": "👑 Admin", "operator": "🔧 Operator", "viewer": "👁️ Viewer"}
 
@@ -39,28 +44,52 @@ ROLE_CAN = {
     "viewer":   {"screen","stream","status","live"},
 }
 
-# users: {str(user_id): {"role": "...", "name": "..."}}
-# Хранится в JSONBin.io — не теряется при передеплое на Railway
+# ─── ХРАНЕНИЕ ПОЛЬЗОВАТЕЛЕЙ ЧЕРЕЗ RAILWAY API ─────────────────
+# Пользователи сохраняются в переменную USERS прямо в Railway Variables.
+# При передеплое переменная остаётся — данные не теряются.
+
+def _gql(query: str, variables: dict) -> dict:
+    try:
+        r = requests.post(
+            RAILWAY_GQL,
+            json={"query": query, "variables": variables},
+            headers={"Authorization": f"Bearer {RAILWAY_TOKEN}", "Content-Type": "application/json"},
+            timeout=8
+        )
+        return r.json()
+    except Exception as e:
+        print(f"[Railway API] Error: {e}")
+        return {}
 
 def load_users() -> dict:
+    # Читаем из переменной окружения USERS (уже есть в памяти процесса)
+    raw = os.environ.get("USERS", "{}")
     try:
-        headers = {"X-Master-Key": JSONBIN_KEY}
-        r = requests.get(f"{JSONBIN_URL}/latest", headers=headers, timeout=5)
-        if r.status_code == 200:
-            data = r.json().get("record", {})
-            if isinstance(data, dict):
-                return data.get("users", data) if "users" in data else data
-        return {}
-    except Exception as e:
-        print(f"[JSONBin] Load error: {e}")
+        return json.loads(raw)
+    except Exception:
         return {}
 
 def save_users(users: dict):
-    try:
-        headers = {"X-Master-Key": JSONBIN_KEY, "Content-Type": "application/json"}
-        requests.put(JSONBIN_URL, json={"users": users}, headers=headers, timeout=5)
-    except Exception as e:
-        print(f"[JSONBin] Save error: {e}")
+    # Записываем в Railway Variable USERS через GraphQL API
+    if not RAILWAY_PROJECT_ID or not RAILWAY_ENV_ID or not RAILWAY_SERVICE_ID:
+        print("[Railway API] Missing project/env/service ID — users not saved to Variables")
+        return
+    mutation = """
+    mutation variableUpsert($input: VariableUpsertInput!) {
+      variableUpsert(input: $input)
+    }
+    """
+    result = _gql(mutation, {"input": {
+        "projectId":     RAILWAY_PROJECT_ID,
+        "environmentId": RAILWAY_ENV_ID,
+        "serviceId":     RAILWAY_SERVICE_ID,
+        "name":          "USERS",
+        "value":         json.dumps(users, ensure_ascii=False)
+    }})
+    if result.get("data", {}).get("variableUpsert"):
+        print(f"[Railway API] USERS saved ({len(users)} users)")
+    else:
+        print(f"[Railway API] Save failed: {result}")
 
 users_db: dict = load_users()
 
