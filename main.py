@@ -5,7 +5,7 @@ import json
 import requests
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -177,6 +177,9 @@ browser_pc: dict = {}
 last_frames: dict[str, bytes] = {}
 poll_results: dict[str, dict] = {}
 pending_adduser: dict[int, int] = {}  # admin_chat_id -> target_user_id
+audio_clients: set = set()
+audio_pc: dict = {}   # websocket -> pc_id
+file_results: dict[str, dict] = {}  # pc_id -> last dir listing
 
 def get_step(chat_id): return mouse_step.get(chat_id, 100)
 def get_active(chat_id):
@@ -229,6 +232,9 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .s-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:7px;padding:6px 9px;font-size:12px;cursor:pointer}
 .s-btn:active{background:#333}
 .s-btn.r{border-color:#500}.s-btn.r:active{background:#300;color:var(--red)}
+.scale-btn,.fps-btn{flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:7px;padding:7px 4px;font-size:12px;cursor:pointer;text-align:center}
+.scale-btn.active,.fps-btn.active{border-color:var(--accent);color:var(--accent);background:#1a2030}
+.scale-btn:active,.fps-btn:active{background:var(--bg2)}
 #type-bar{background:var(--bg2);border-top:1px solid var(--border);padding:7px;display:flex;gap:5px;flex-shrink:0}
 #type-inp{flex:1;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:9px;font-size:13px}
 #type-inp:focus{outline:none;border-color:var(--accent)}
@@ -303,6 +309,7 @@ canvas{width:100%;height:60px;display:block}
   <div class="tab" onclick="showTab('control')"><span class="tab-icon">🎮</span>Управление</div>
   <div class="tab" onclick="showTab('monitor')"><span class="tab-icon">📊</span>Монитор</div>
   <div class="tab" onclick="showTab('terminal')"><span class="tab-icon">⌨️</span>Терминал</div>
+  <div class="tab" onclick="showTab('files')"><span class="tab-icon">📁</span>Файлы</div>
   <div class="tab" onclick="showTab('users')"><span class="tab-icon">👥</span>Юзеры</div>
 </div>
 
@@ -323,16 +330,70 @@ canvas{width:100%;height:60px;display:block}
   <div id="screen-btns">
     <button class="s-btn" onclick="doScreen()">📸</button>
     <button class="s-btn" onclick="toggleStream()" id="stream-btn">📡 Стрим</button>
+    <button class="s-btn" onclick="toggleAudio()" id="audio-btn">🔇 Аудио</button>
     <button class="s-btn" onclick="cmd({action:'scroll',direction:'up'})">🔼</button>
     <button class="s-btn" onclick="cmd({action:'scroll',direction:'down'})">🔽</button>
     <button class="s-btn" onclick="cmd({action:'hotkey',keys:['ctrl','c']})">📋</button>
     <button class="s-btn" onclick="cmd({action:'hotkey',keys:['ctrl','v']})">📌</button>
     <button class="s-btn" onclick="cmd({action:'key',key:'enter'})">↵</button>
     <button class="s-btn" onclick="cmd({action:'key',key:'esc'})">⎋</button>
+    <button class="s-btn" onclick="toggleSettings()" id="settings-btn">⚙️</button>
     <button class="s-btn r" onclick="confirm('Блок?')&&cmd({action:'lock'})">🔒</button>
     <button class="s-btn r" onclick="confirm('Ребут?')&&cmd({action:'reboot'})">🔄</button>
     <button class="s-btn r" onclick="confirm('Выкл?')&&cmd({action:'shutdown'})">⏻</button>
   </div>
+
+  <!-- Панель настроек (скрыта по умолчанию) -->
+  <div id="settings-panel" style="display:none;background:var(--bg2);border-top:1px solid var(--border);padding:10px;flex-shrink:0">
+
+    <!-- Качество -->
+    <div style="margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+        <span style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px">🎨 Качество JPEG</span>
+        <span id="quality-val" style="font-size:11px;color:var(--accent);font-family:monospace">65%</span>
+      </div>
+      <input type="range" id="quality-slider" min="15" max="95" value="65" step="5"
+        oninput="onQualityChange(this.value)"
+        style="width:100%;accent-color:var(--accent)">
+      <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text2);margin-top:2px">
+        <span>Быстро</span><span>Баланс</span><span>Чётко</span>
+      </div>
+    </div>
+
+    <!-- Масштаб -->
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px">🔍 Масштаб экрана</div>
+      <div style="display:flex;gap:4px">
+        <button class="scale-btn active" id="scale-50" onclick="setScale(0.5,'scale-50')">0.5x</button>
+        <button class="scale-btn" id="scale-75" onclick="setScale(0.75,'scale-75')">0.75x</button>
+        <button class="scale-btn" id="scale-100" onclick="setScale(1.0,'scale-100')">1.0x</button>
+      </div>
+    </div>
+
+    <!-- FPS -->
+    <div style="margin-bottom:10px">
+      <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px">⚡ FPS стрима</div>
+      <div style="display:flex;gap:4px">
+        <button class="fps-btn" id="fps-5" onclick="setFps(5,'fps-5')">5</button>
+        <button class="fps-btn" id="fps-10" onclick="setFps(10,'fps-10')">10</button>
+        <button class="fps-btn active" id="fps-15" onclick="setFps(15,'fps-15')">15</button>
+        <button class="fps-btn" id="fps-20" onclick="setFps(20,'fps-20')">20</button>
+        <button class="fps-btn" id="fps-30" onclick="setFps(30,'fps-30')">30</button>
+      </div>
+    </div>
+
+    <!-- Пресеты -->
+    <div>
+      <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px">🎯 Пресеты</div>
+      <div style="display:flex;gap:4px">
+        <button onclick="applyPreset('economy')" style="flex:1;background:var(--bg3);border:1px solid #555;color:var(--text2);border-radius:7px;padding:7px 4px;font-size:11px;cursor:pointer">🔋 Экономия</button>
+        <button onclick="applyPreset('balance')" style="flex:1;background:var(--bg3);border:1px solid var(--accent);color:var(--accent);border-radius:7px;padding:7px 4px;font-size:11px;cursor:pointer">⚖️ Баланс</button>
+        <button onclick="applyPreset('quality')" style="flex:1;background:var(--bg3);border:1px solid #fbbf24;color:#fbbf24;border-radius:7px;padding:7px 4px;font-size:11px;cursor:pointer">✨ Качество</button>
+        <button onclick="applyPreset('gaming')" style="flex:1;background:var(--bg3);border:1px solid #f87171;color:#f87171;border-radius:7px;padding:7px 4px;font-size:11px;cursor:pointer">🎮 Игры</button>
+      </div>
+    </div>
+  </div>
+
   <div id="type-bar">
     <input id="type-inp" type="text" placeholder="Текст → на ПК...">
     <button id="type-go" onclick="sendText()">⌨️</button>
@@ -474,6 +535,16 @@ canvas{width:100%;height:60px;display:block}
   </div>
 </div>
 
+<!-- ФАЙЛЫ -->
+<div id="page-files" class="page">
+  <div style="padding:10px;display:flex;gap:8px;align-items:center;flex-shrink:0">
+    <div id="file-path" style="flex:1;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:12px;font-family:monospace;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">/</div>
+    <button onclick="loadFiles('')" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 11px;font-size:13px;cursor:pointer">🏠</button>
+    <button onclick="loadFiles(fileParent)" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 11px;font-size:13px;cursor:pointer">⬆️</button>
+  </div>
+  <div id="file-list" style="flex:1;overflow-y:auto;padding:0 10px 10px"></div>
+</div>
+
 <!-- ПОЛЬЗОВАТЕЛИ -->
 <div id="page-users" class="page">
   <div id="users-list" style="padding:10px;display:flex;flex-direction:column;gap:8px"></div>
@@ -516,12 +587,13 @@ function showTab(n) {
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   document.getElementById('page-'+n).classList.add('active');
-  const tabs=['pcs','screen','control','monitor','terminal','users'];
+  const tabs=['pcs','screen','control','monitor','terminal','files','users'];
   const idx = tabs.indexOf(n);
   if(idx>=0) document.querySelectorAll('.tab')[idx].classList.add('active');
   if(n==='pcs') loadPcs();
   if(n==='monitor'){loadProcs();startMonitor();}else stopMonitor();
   if(n==='users') loadUsers();
+  if(n==='files') loadFiles('');
 }
 
 function toast(m){
@@ -863,6 +935,171 @@ async function poll(){
 setInterval(poll,1500);
 setInterval(()=>{if(document.getElementById('page-pcs').classList.contains('active'))loadPcs();},5000);
 
+// ── АУДИО ──
+let audioCtx=null, audioWs=null, audioOn=false;
+let audioQueue=[], audioPlaying=false, nextTime=0;
+
+function toggleAudio(){
+  if(!pcId){toast('❌ Выбери ПК!');return;}
+  audioOn=!audioOn;
+  const btn=document.getElementById('audio-btn');
+  if(audioOn){
+    // Подключаем WebSocket для аудио
+    const proto=location.protocol==='https:'?'wss':'ws';
+    audioWs=new WebSocket(`${proto}://${location.host}/audio-ws?pc=${pcId}`);
+    audioWs.binaryType='arraybuffer';
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
+    audioWs.onmessage=(e)=>{
+      const f32=new Float32Array(e.data);
+      audioQueue.push(f32);
+      if(!audioPlaying)scheduleAudio();
+    };
+    audioWs.onclose=()=>{if(audioOn)toggleAudio();};
+    // Говорим агенту начать захват
+    fetch(BASE+'/api/audio/'+pcId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'start'})});
+    btn.textContent='🔊 Аудио';btn.style.background='#1a3a1a';btn.style.borderColor='#4ade80';
+    toast('🔊 Аудио включено');
+  } else {
+    fetch(BASE+'/api/audio/'+pcId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'stop'})});
+    if(audioWs){audioWs.close();audioWs=null;}
+    if(audioCtx){audioCtx.close();audioCtx=null;}
+    audioQueue=[];audioPlaying=false;nextTime=0;
+    btn.textContent='🔇 Аудио';btn.style.background='';btn.style.borderColor='';
+    toast('🔇 Аудио выключено');
+  }
+}
+
+function scheduleAudio(){
+  if(!audioCtx||audioQueue.length===0){audioPlaying=false;return;}
+  audioPlaying=true;
+  const chunk=audioQueue.shift();
+  const buf=audioCtx.createBuffer(1,chunk.length,16000);
+  buf.getChannelData(0).set(chunk);
+  const src=audioCtx.createBufferSource();
+  src.buffer=buf;
+  src.connect(audioCtx.destination);
+  const when=Math.max(audioCtx.currentTime,nextTime);
+  src.start(when);
+  nextTime=when+buf.duration;
+  src.onended=scheduleAudio;
+}
+
+// ── ФАЙЛОВЫЙ МЕНЕДЖЕР ──
+let fileParent=null;
+
+async function loadFiles(path){
+  if(!pcId){toast('❌ Выбери ПК!');return;}
+  document.getElementById('file-list').innerHTML='<div style="color:var(--text2);padding:20px;text-align:center">⏳ Загрузка...</div>';
+  const r=await fetch(BASE+'/api/files/'+pcId+'?path='+encodeURIComponent(path||''));
+  if(!r.ok){document.getElementById('file-list').innerHTML='<div style="color:var(--red);padding:20px">❌ Ошибка</div>';return;}
+  const d=await r.json();
+  if(d.error){document.getElementById('file-list').innerHTML=`<div style="color:var(--red);padding:20px">❌ ${d.error}</div>`;return;}
+  fileParent=d.parent||null;
+  document.getElementById('file-path').textContent=d.path||'/';
+  const items=d.items||[];
+  if(!items.length){document.getElementById('file-list').innerHTML='<div style="color:var(--text2);padding:20px;text-align:center">Папка пустая</div>';return;}
+  document.getElementById('file-list').innerHTML=items.map(item=>{
+    const icon=item.type==='drive'?'💿':item.type==='dir'?'📁':'📄';
+    const size=item.type==='file'?formatSize(item.size):'';
+    return `<div onclick="${item.type!=='file'?`loadFiles('${(d.path==='/'?'':d.path)+'/'+item.name}'.replace('//','/'))`:``}" 
+      style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);cursor:${item.type!=='file'?'pointer':'default'}">
+      <span style="font-size:18px">${icon}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${item.name}</div>
+        ${size?`<div style="font-size:11px;color:var(--text2)">${size}</div>`:''}
+      </div>
+      ${item.type==='file'?`<button onclick="downloadFile('${d.path}','${item.name}')" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:4px 9px;font-size:11px;cursor:pointer">⬇️</button>`:''}
+    </div>`;
+  }).join('');
+}
+
+function formatSize(bytes){
+  if(bytes<1024)return bytes+'B';
+  if(bytes<1048576)return (bytes/1024).toFixed(1)+'KB';
+  if(bytes<1073741824)return (bytes/1048576).toFixed(1)+'MB';
+  return (bytes/1073741824).toFixed(2)+'GB';
+}
+
+function downloadFile(dir,name){
+  const full=(dir==='/'?'/':dir)+'/'+name;
+  cmd({action:'send_file',path:full});
+  toast('📥 Отправляю в TG...');
+}
+
+// ── НАСТРОЙКИ КАЧЕСТВА ──
+let currentQuality=65, currentScale=0.75, currentFps=15;
+let settingsOpen=false;
+let streamIntervalMs=Math.round(1000/15);
+
+function toggleSettings(){
+  settingsOpen=!settingsOpen;
+  document.getElementById('settings-panel').style.display=settingsOpen?'block':'none';
+  document.getElementById('settings-btn').style.background=settingsOpen?'#1a2030':'';
+  document.getElementById('settings-btn').style.borderColor=settingsOpen?'var(--accent)':'';
+}
+
+function onQualityChange(val){
+  currentQuality=parseInt(val);
+  document.getElementById('quality-val').textContent=val+'%';
+  sendQualitySettings();
+}
+
+function setScale(val,id){
+  currentScale=val;
+  document.querySelectorAll('.scale-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  sendQualitySettings();
+  toast('Масштаб: '+val+'x');
+}
+
+function setFps(val,id){
+  currentFps=val;
+  streamIntervalMs=Math.round(1000/val);
+  document.querySelectorAll('.fps-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  // Перезапускаем стрим если активен
+  if(streaming){
+    clearInterval(streamInt);
+    streamInt=setInterval(()=>{
+      fetch(BASE+'/live-cmd?pc='+pcId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'screenshot_live'})});
+    },streamIntervalMs);
+  }
+  sendQualitySettings();
+  toast('FPS: '+val);
+}
+
+function sendQualitySettings(){
+  if(!pcId)return;
+  cmd({action:'set_quality',quality:currentQuality,scale:currentScale,fps:currentFps});
+}
+
+function applyPreset(name){
+  const presets={
+    economy: {quality:25,scale:0.5, fps:5,  scaleId:'scale-50', fpsId:'fps-5'},
+    balance: {quality:65,scale:0.75,fps:15, scaleId:'scale-75', fpsId:'fps-15'},
+    quality: {quality:85,scale:1.0, fps:10, scaleId:'scale-100',fpsId:'fps-10'},
+    gaming:  {quality:40,scale:0.75,fps:30, scaleId:'scale-75', fpsId:'fps-30'},
+  };
+  const p=presets[name];if(!p)return;
+  currentQuality=p.quality;currentScale=p.scale;currentFps=p.fps;
+  document.getElementById('quality-slider').value=p.quality;
+  document.getElementById('quality-val').textContent=p.quality+'%';
+  document.querySelectorAll('.scale-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById(p.scaleId).classList.add('active');
+  document.querySelectorAll('.fps-btn').forEach(b=>b.classList.remove('active'));
+  document.getElementById(p.fpsId).classList.add('active');
+  streamIntervalMs=Math.round(1000/p.fps);
+  if(streaming){
+    clearInterval(streamInt);
+    streamInt=setInterval(()=>{
+      fetch(BASE+'/live-cmd?pc='+pcId,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'screenshot_live'})});
+    },streamIntervalMs);
+  }
+  sendQualitySettings();
+  const names={economy:'🔋 Экономия',balance:'⚖️ Баланс',quality:'✨ Качество',gaming:'🎮 Игры'};
+  toast(names[name]+' применён');
+}
+
 init();
 </script>
 </body>
@@ -915,6 +1152,34 @@ async def api_run(request: Request):
         pm.log(pc_id, ADMIN_ID, f"run: {cmd_text}")
         await pm.send(pc_id,{"action":"run","command":cmd_text,"chat_id":None})
     return {"ok":True}
+
+@app.get("/api/files/{pc_id}")
+async def api_files(pc_id: str, path: str = ""):
+    await pm.send(pc_id, {"action": "list_dir", "path": path, "chat_id": None})
+    await asyncio.sleep(1.5)
+    result = file_results.pop(pc_id, {"error": "Нет ответа от агента"})
+    return result
+
+@app.post("/api/audio/{pc_id}")
+async def api_audio(pc_id: str, request: Request):
+    data = await request.json()
+    action = data.get("action", "start")
+    await pm.send(pc_id, {"action": f"audio_{action}", "chat_id": None})
+    return {"ok": True}
+
+@app.websocket("/audio-ws")
+async def audio_ws_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    pc_id = websocket.query_params.get("pc")
+    audio_clients.add(websocket)
+    audio_pc[websocket] = pc_id
+    try:
+        await websocket.receive_text()
+    except Exception:
+        pass
+    finally:
+        audio_clients.discard(websocket)
+        audio_pc.pop(websocket, None)
 
 @app.get("/api/users")
 async def api_users():
@@ -1112,8 +1377,9 @@ async def agent_ws(websocket: WebSocket):
                     if browser_pc.get(cl) == pid:
                         try: await cl.send_bytes(img)
                         except: dead.add(cl)
-                browser_clients -= dead
-                for d in dead: browser_pc.pop(d,None)
+                for d in dead:
+                    browser_clients.discard(d)
+                    browser_pc.pop(d, None)
                 if t == "screenshot":
                     cid = data.get("chat_id"); mid = data.get("message_id")
                     if cid:
@@ -1167,6 +1433,24 @@ async def agent_ws(websocket: WebSocket):
                     fb = base64.b64decode(data.get("data"))
                     doc = BufferedInputFile(fb,filename=data.get("filename","file"))
                     await bot.send_document(cid,doc)
+
+            elif t == "audio":
+                # Пересылаем аудио чанк браузерам
+                raw = base64.b64decode(data.get("data",""))
+                dead = set()
+                for cl in list(audio_clients):
+                    if audio_pc.get(cl) == pid:
+                        try: await cl.send_bytes(raw)
+                        except: dead.add(cl)
+                for d in dead:
+                    audio_clients.discard(d)
+                    audio_pc.pop(d, None)
+
+            elif t == "audio_status":
+                pass  # просто логируем
+
+            elif t == "dir_listing":
+                file_results[pid] = data
 
     except WebSocketDisconnect: pass
     except Exception as e: print(f"[WS] {e}")
@@ -1235,7 +1519,7 @@ def get_pc_list_kb():
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def get_users_kb():
-    rows = [[InlineKeyboardButton(text=f"➕ Добавить пользователя",callback_data="adduser_start")]]
+    rows = [[InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="adduser_start")]]
     for uid, info in users_db.items():
         role_icon = {"admin":"👑","operator":"🔧","viewer":"👁️"}.get(info["role"],"?")
         rows.append([
